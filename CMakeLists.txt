@@ -14,7 +14,6 @@ CPMAddPackage(
           "BOOST_ENABLE_CMAKE ON"
           "BOOST_INCLUDE_LIBRARIES asio\\\;program_options")
 
-
 # Library
 add_library(snmp src/lib/snmp.cpp)
 add_library(snmp::snmp ALIAS snmp)
@@ -23,5 +22,10 @@ target_include_directories(snmp PUBLIC src/lib)
 target_link_libraries(snmp PUBLIC Boost::asio)
 
 # Example
-add_executable(example src/examples/main.cpp)
-target_link_libraries(example PRIVATE snmp::snmp)
+add_executable(snmp.example src/examples/main.cpp)
+target_link_libraries(snmp.example PRIVATE snmp::snmp)
+
+# Tests
+add_executable(snmp.tests
+  src/tests/doctest.cpp)
+target_link_libraries(snmp.example PRIVATE snmp::snmp)
