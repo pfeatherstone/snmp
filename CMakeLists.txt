@@ -15,17 +15,17 @@ CPMAddPackage(
           "BOOST_INCLUDE_LIBRARIES asio\\\;program_options")
 
 # Library
-add_library(snmp src/lib/snmp.cpp)
+add_library(snmp lib/snmp/snmp.cpp)
 add_library(snmp::snmp ALIAS snmp)
-target_compile_features(snmp PUBLIC cxx_std_17)
-target_include_directories(snmp PUBLIC src/lib)
+target_compile_features(snmp PUBLIC cxx_std_20)
+target_include_directories(snmp PUBLIC lib/)
 target_link_libraries(snmp PUBLIC Boost::asio)
 
 # Example
-add_executable(snmp.example src/examples/main.cpp)
+add_executable(snmp.example examples/main.cpp)
 target_link_libraries(snmp.example PRIVATE snmp::snmp)
 
 # Tests
 add_executable(snmp.tests
-  src/tests/doctest.cpp)
+  tests/doctest.cpp)
 target_link_libraries(snmp.example PRIVATE snmp::snmp)
