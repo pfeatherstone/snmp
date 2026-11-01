@@ -1,33 +1,19 @@
 #pragma once
 
-#include <cstdint>
-#include <concepts>
-#include <type_traits>
+#include <bit>
 #include <string_view>
+#include "traits.h"
 
 namespace snmp
 {
 
 //----------------------------------------------------------------------------------------------------------------
 
-    template<class Byte>
-    constexpr bool is_byte = std::is_same_v<Byte, char>     || 
-                             std::is_same_v<Byte, uint8_t>  ||
-                             std::is_same_v<Byte, int8_t>;
-
-    template<class Byte>
-    concept byte_type = is_byte<Byte>;
-
-//----------------------------------------------------------------------------------------------------------------
-
-    template<class F> concept sink_type   = std::invocable<F, const char*, std::size_t>;
-    template<class F> concept source_type = std::invocable<F, char*, std::size_t>;
-
-//----------------------------------------------------------------------------------------------------------------
-
-    void ber_serialize(std::integral auto v,        sink_type auto& sink);
-    void ber_serialize(std::floating_point auto v,  sink_type auto& sink);
-    void ber_serialize(std::string_view v,          sink_type auto& sink);
+    void ber_serialize(std::nullptr_t,              sink_type auto&& sink);
+    void ber_serialize(bool v,                      sink_type auto&& sink);
+    void ber_serialize(std::integral auto v,        sink_type auto&& sink);
+    void ber_serialize(std::string_view v,          sink_type auto&& sink);
+    void ber_serialize(const char* v,               sink_type auto&& sink);
 
 //----------------------------------------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------------------------------------
@@ -37,6 +23,9 @@ namespace snmp
 
     namespace details
     {
+
+//----------------------------------------------------------------------------------------------------------------
+
         constexpr uint16_t byte_swap16(uint16_t v)
         {
             return static_cast<uint16_t>(((v & 0x00FF) << 8) | ((v & 0xFF00) >> 8));
@@ -66,19 +55,12 @@ namespace snmp
         static_assert(byte_swap32(0x12345678)           == 0x78563412,          "bad swap");
         static_assert(byte_swap64(0x123456789abcdef1)   == 0xf1debc9a78563412,  "bad swap");
 
-#if __cpp_lib_endian
-        constexpr bool is_little_endian()
-        {
-            return std::endian::native == std::endian::little;
-        }
-#else
         inline bool is_little_endian() 
         {
             constexpr uint32_t v{0x01020304};
             const auto*        ptr{reinterpret_cast<const unsigned char*>(&v)};
             return ptr[0] == 0x04;
         }
-#endif
 
 //----------------------------------------------------------------------------------------------------------------
 
@@ -88,16 +70,16 @@ namespace snmp
 
 //----------------------------------------------------------------------------------------------------------------
 
-        constexpr uint8_t TYPE_BOOLEAN      = 0b00000001;
-        constexpr uint8_t TYPE_INTEGER      = 0b00000010;
-        constexpr uint8_t TYPE_STRING       = 0b00000100;
-        constexpr uint8_t TYPE_NULL         = 0b00000101;
-        constexpr uint8_t TYPE_ENUMERATED   = 0b00001010;
-        constexpr uint8_t TYPE_SEQUENCE     = 0b00110000;
-        constexpr uint8_t TYPE_SET          = 0b00110001;
+        constexpr uint8_t TAG_BOOLEAN      = 0b00000001;
+        constexpr uint8_t TAG_INTEGER      = 0b00000010;
+        constexpr uint8_t TAG_STRING       = 0b00000100;
+        constexpr uint8_t TAG_NULL         = 0b00000101;
+        constexpr uint8_t TAG_ENUMERATED   = 0b00001010;
+        constexpr uint8_t TAG_SEQUENCE     = 0b00110000;
+        constexpr uint8_t TAG_SET          = 0b00110001;
 
         constexpr uint8_t CLASS_UNIVERSAL   = 0b00000000;
-        constexpr uint8_t CLASS_APPLICATON  = 0b01000000;
+        constexpr uint8_t CLASS_APPLICATION = 0b01000000;
         constexpr uint8_t CLASS_CONTEXT     = 0b10000000;
         constexpr uint8_t CLASS_PRIVATE     = 0b11000000;
 
@@ -106,6 +88,104 @@ namespace snmp
 
         constexpr uint8_t TYPE_MULTI_MASK   = 0b00011111;
 
+//----------------------------------------------------------------------------------------------------------------
+
+        inline void ber_serialize_length(size_t len, sink_type auto& sink)
+        {
+            if (len < 128u)
+            {
+                const char tmp = len;
+                sink(&tmp, 1);
+            }
+            else
+            {
+                const size_t nbytes = (std::bit_width(len) + 7) / 8;
+                char buf[9];
+                buf[0] = static_cast<char>(0x80u | nbytes);
+                for (size_t i = 0; i < nbytes; ++i)
+                    buf[i+1] = static_cast<char>((len >> ((nbytes - 1 - i) * 8)) & 0xffu);
+                sink(buf, 1 + nbytes);
+            }
+        }
+
+//----------------------------------------------------------------------------------------------------------------
 
     }
+
+//----------------------------------------------------------------------------------------------------------------
+
+    inline void ber_serialize(std::nullptr_t, sink_type auto&& sink)
+    {
+        using namespace details;
+        const char buf[2] = {TAG_NULL, 0};
+        sink(buf, 2);
+    }
+
+//----------------------------------------------------------------------------------------------------------------
+
+    inline void ber_serialize(bool v, sink_type auto&& sink)
+    {
+        using namespace details;
+        constexpr uint8_t true_  = 0xffu;
+        constexpr uint8_t false_ = 0u;
+        const uint8_t buf[3] = {TAG_BOOLEAN, 1, v ? true_ : false_};
+        sink((const char*)buf, 3);
+    }
+
+//----------------------------------------------------------------------------------------------------------------
+
+    inline void ber_serialize(std::integral auto v, sink_type auto&& sink)
+    {
+        using namespace details;
+        using T = decltype(v);
+        using U = std::make_unsigned_t<T>;
+
+        // Calculate number of bytes
+        const U bits = static_cast<U>(v);
+        U possibly_inverted_bits{bits};
+
+        if constexpr (std::is_signed_v<T>)
+            if (v < 0)
+                possibly_inverted_bits = static_cast<U>(~bits);
+
+        const size_t nbytes = (std::bit_width(possibly_inverted_bits) + 8) / 8; // +1 for sign bit
+
+        // Serialize tag and length
+        sink((const char*)&TAG_INTEGER, 1);
+        ber_serialize_length(nbytes, sink);
+
+        // Serialize integer - special consideration for possible leading zero because of sign bit
+        char buf[sizeof(U) + 1];
+
+        for (size_t i = 0; i < nbytes; ++i)
+        {
+            const size_t idx = nbytes - 1 - i;
+
+            if (idx >= sizeof(U))
+                buf[i] = 0; // Extra leading zero for a positive unsigned value
+            else
+                buf[i] = static_cast<char>((bits >> (idx * 8)) & 0xffu);
+        }
+
+        sink(buf, nbytes);
+    }
+
+//----------------------------------------------------------------------------------------------------------------
+
+    void ber_serialize(std::string_view v, sink_type auto&& sink)
+    {
+        using namespace details;
+        sink((const char*)&TAG_STRING, 1);
+        ber_serialize_length(v.size(), sink);
+        if (!v.empty())
+            sink(v.data(), v.size());
+    }
+
+    void ber_serialize(const char* v, sink_type auto&& sink)
+    {
+        ber_serialize(std::string_view(v), sink);
+    }
+    
+//----------------------------------------------------------------------------------------------------------------
+
 }

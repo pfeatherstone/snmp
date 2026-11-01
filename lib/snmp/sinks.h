@@ -1,6 +1,8 @@
 #pragma once
 
-#include "ber.h"
+#include <ostream>
+#include <vector>
+#include "traits.h"
 
 namespace snmp
 {
@@ -21,6 +23,8 @@ namespace snmp
     {
         return [&](const char* bytes, size_t nbytes) {
             out.write(bytes, nbytes);
+            if (!out)
+                throw std::ios_base::failure("SNMP sink write failed");
         };
     }
 
