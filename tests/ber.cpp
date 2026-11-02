@@ -115,4 +115,16 @@ TEST_SUITE("[BER]")
             CHECK(m == m_);
         }
     }
+
+    TEST_CASE("tuple")
+    {
+        std::mt19937 eng(std::random_device{}());
+        std::tuple<int, bool, std::string> a(1, true, "example");
+        std::tuple<int, bool, std::string> b{};
+
+        std::vector<char> buf;
+        ber_serialize(a, sink(buf));
+        ber_deserialize(b, source(buf));
+        CHECK(a == b);
+    }
 }

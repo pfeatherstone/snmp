@@ -4,6 +4,7 @@
 #include <bit>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include "traits.h"
 #include "error.h"
 
@@ -35,6 +36,14 @@ namespace snmp
 
     void ber_serialize(const const_sequence_container auto& v, sink_type auto&& sink);
     void ber_deserialize(appendable_sequence_container auto& v, source_type auto&& src);
+
+//----------------------------------------------------------------------------------------------------------------
+
+    template<class... Types>
+    void ber_serialize(const std::tuple<Types...>& v, sink_type auto&& sink);
+
+    template<class... Types>
+    void ber_deserialize(std::tuple<Types...>& v, source_type auto&& src);
 
 //----------------------------------------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------------------------------------
@@ -175,13 +184,15 @@ namespace snmp
 
 //----------------------------------------------------------------------------------------------------------------
 
-        inline auto counted_source(size_t& counter, source_type auto& src)
+        inline auto bounded_source(const size_t bounded_len, size_t& off, source_type auto& src)
         {
-            return [&counter, &src](char* buf, size_t len) {
+            return [bounded_len, &off, &src](char* buf, size_t len) {
+                if (len > (bounded_len-off))
+                    throw std::system_error(snmp_error::UNEXPECTED_LENGTH);
                 src(buf, len);
-                counter += len;
+                off += len;
             };
-        }
+        };
 
 //----------------------------------------------------------------------------------------------------------------
 
@@ -280,13 +291,13 @@ namespace snmp
         src((char*)buf, len);
         const bool negative = (buf[0] & 0x80u) != 0;
 
-        uint64_t bits = negative ? std::numeric_limits<uint64_t>::max() : uint64_t{0};
-        for (size_t i = 0 ; i < len ; ++i)
-            bits = (bits << 8) | static_cast<uint64_t>(buf[i]);
-
         if constexpr (std::is_unsigned_v<T>)
             if (negative)
                 throw std::system_error(snmp_error::INTEGER_OVERFLOW);
+
+        uint64_t bits = negative ? std::numeric_limits<uint64_t>::max() : uint64_t{0};
+        for (size_t i = 0 ; i < len ; ++i)
+            bits = (bits << 8) | static_cast<uint64_t>(buf[i]);
 
         v = static_cast<T>(bits);
     }
@@ -353,15 +364,70 @@ namespace snmp
             throw std::system_error(snmp_error::UNEXPECTED_TAG);
 
         const size_t len = ber_deserialize_length(src);
-        size_t counter{};
+        size_t off{};
         v.clear();
 
-        for (; counter < len;)
+        for (; off < len;)
         {
             T el{};
-            ber_deserialize(el, counted_source(counter, src));
+            ber_deserialize(el, bounded_source(len, off, src));
             v.push_back(std::move(el));
         }
+    }
+
+//----------------------------------------------------------------------------------------------------------------
+
+    namespace details
+    {
+        template <class Tuple, class F>
+        constexpr void for_each_in_tuple(Tuple&& t, F&& f)
+        {
+            [&]<std::size_t... I>(std::index_sequence<I...>) {
+                (f(std::get<I>(std::forward<Tuple>(t))), ...);
+            }(std::make_index_sequence<std::tuple_size_v<std::remove_cvref_t<Tuple>>>{});
+        }
+    }
+
+    template<class ... Types>
+    inline void ber_serialize(const std::tuple<Types...>& tpl, sink_type auto&& sink)
+    {
+        using namespace details;
+        using snmp::ber_serialize;
+
+        // This function has to serialize TWICE!!!
+
+        // Count total number of bytes required to serialize v
+        size_t counter{};
+        for_each_in_tuple(tpl, [&](const auto& el) {
+            ber_serialize(el, counter_sink(counter));
+        });
+
+        // Serialize to sink
+        sink((const char*)&TAG_SEQUENCE, 1);
+        ber_serialize_length(counter, sink);
+        for_each_in_tuple(tpl, [&](const auto& el) {
+            ber_serialize(el, sink);
+        });
+    }
+
+    template<class... Types>
+    inline void ber_deserialize(std::tuple<Types...>& tpl, source_type auto&& src)
+    {
+        using namespace details;
+        using snmp::ber_deserialize;
+
+        if (read_one(src) != TAG_SEQUENCE)
+            throw std::system_error(snmp_error::UNEXPECTED_TAG);
+
+        const size_t len = ber_deserialize_length(src);
+        size_t off{};
+
+        for_each_in_tuple(tpl, [&](auto& el) {
+            ber_deserialize(el, bounded_source(len, off, src));
+        });
+
+        if (off != len)
+            throw std::system_error(snmp_error::UNEXPECTED_LENGTH);
     }
 
 //----------------------------------------------------------------------------------------------------------------

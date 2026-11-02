@@ -20,7 +20,7 @@ add_library(snmp
   lib/snmp/error.cpp)
 add_library(snmp::snmp ALIAS snmp)
 target_compile_features(snmp PUBLIC cxx_std_20)
-target_compile_options(snmp PRIVATE -Wall -Wextra -Werror)
+target_compile_options(snmp PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_include_directories(snmp PUBLIC lib/)
 target_link_libraries(snmp PUBLIC Boost::asio)
 
@@ -32,5 +32,5 @@ target_link_libraries(snmp.example PRIVATE snmp::snmp)
 add_executable(snmp.tests
   tests/doctest.cpp
   tests/ber.cpp)
-target_compile_options(snmp.tests PRIVATE -Wall -Wextra -Werror)
+target_compile_options(snmp.tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(snmp.tests PRIVATE snmp::snmp)
