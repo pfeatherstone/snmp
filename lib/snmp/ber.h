@@ -1,19 +1,40 @@
 #pragma once
 
+#include <limits>
 #include <bit>
+#include <string>
 #include <string_view>
 #include "traits.h"
+#include "error.h"
 
 namespace snmp
 {
 
 //----------------------------------------------------------------------------------------------------------------
 
-    void ber_serialize(std::nullptr_t,              sink_type auto&& sink);
-    void ber_serialize(bool v,                      sink_type auto&& sink);
-    void ber_serialize(std::integral auto v,        sink_type auto&& sink);
-    void ber_serialize(std::string_view v,          sink_type auto&& sink);
-    void ber_serialize(const char* v,               sink_type auto&& sink);
+    void ber_serialize  (std::nullptr_t, sink_type auto&& sink);
+    void ber_deserialize(std::nullptr_t, source_type auto&& src);
+
+//----------------------------------------------------------------------------------------------------------------
+
+    void ber_serialize  (bool v,  sink_type auto&& sink);
+    void ber_deserialize(bool& v, source_type auto&& src);
+
+//----------------------------------------------------------------------------------------------------------------
+
+    void ber_serialize  (std::integral auto v,  sink_type auto&& sink);
+    void ber_deserialize(std::integral auto& v, source_type auto&& src);
+
+//----------------------------------------------------------------------------------------------------------------
+
+    void ber_serialize(std::string_view v, sink_type auto&& sink);
+    void ber_serialize(const char* v,      sink_type auto&& sink);
+    void ber_deserialize(std::string& v,   source_type auto&& src);
+
+//----------------------------------------------------------------------------------------------------------------
+
+    void ber_serialize(const const_sequence_container auto& v, sink_type auto&& sink);
+    void ber_deserialize(appendable_sequence_container auto& v, source_type auto&& src);
 
 //----------------------------------------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------------------------------------
@@ -90,6 +111,15 @@ namespace snmp
 
 //----------------------------------------------------------------------------------------------------------------
 
+        inline uint8_t read_one(source_type auto& src)
+        {
+            uint8_t tag{};
+            src((char*)&tag, 1);
+            return tag;
+        }
+
+//----------------------------------------------------------------------------------------------------------------
+
         inline void ber_serialize_length(size_t len, sink_type auto& sink)
         {
             if (len < 128u)
@@ -103,9 +133,54 @@ namespace snmp
                 char buf[9];
                 buf[0] = static_cast<char>(0x80u | nbytes);
                 for (size_t i = 0; i < nbytes; ++i)
-                    buf[i+1] = static_cast<char>((len >> ((nbytes - 1 - i) * 8)) & 0xffu);
+                    buf[i+1] = static_cast<char>((len >> ((nbytes - 1 - i) * 8)) & 0xffu); // big endian order
                 sink(buf, 1 + nbytes);
             }
+        }
+
+        inline size_t ber_deserialize_length(source_type auto& src)
+        {
+            const uint8_t b0 = read_one(src);
+
+            if (b0 < 0x80u)
+                return b0;
+            
+            // Indefinite length is unsupported; 0xFF is reserved.
+            if (b0 == 0x80u || b0 == 0xFFu)
+                throw std::system_error(snmp_error::UNEXPECTED_LENGTH);
+            
+            const uint8_t nbytes = b0 & 0x7fu;
+
+            if (nbytes > 8)
+                throw std::system_error(snmp_error::LENGTH_HEADER_OVERFLOW);
+
+            uint8_t buf[8]{};
+            src((char*)buf, nbytes);
+
+            size_t len{0};
+            for (size_t i = 0 ; i < nbytes ; ++i)
+                len = (len << 8) | static_cast<size_t>(buf[i]);
+
+            return len;
+        }
+
+//----------------------------------------------------------------------------------------------------------------
+
+        inline auto counter_sink(std::size_t& counter)
+        {
+            return [&counter](const char*, size_t len) {
+                counter += len;
+            };
+        }
+
+//----------------------------------------------------------------------------------------------------------------
+
+        inline auto counted_source(size_t& counter, source_type auto& src)
+        {
+            return [&counter, &src](char* buf, size_t len) {
+                src(buf, len);
+                counter += len;
+            };
         }
 
 //----------------------------------------------------------------------------------------------------------------
@@ -121,6 +196,15 @@ namespace snmp
         sink(buf, 2);
     }
 
+    inline void ber_deserialize(std::nullptr_t, source_type auto&& src)
+    {
+        using namespace details;
+        if (read_one(src) != TAG_NULL)
+            throw std::system_error(snmp_error::UNEXPECTED_TAG);
+        if (ber_deserialize_length(src) != 0)
+            throw std::system_error(snmp_error::UNEXPECTED_LENGTH);
+    }
+
 //----------------------------------------------------------------------------------------------------------------
 
     inline void ber_serialize(bool v, sink_type auto&& sink)
@@ -130,6 +214,16 @@ namespace snmp
         constexpr uint8_t false_ = 0u;
         const uint8_t buf[3] = {TAG_BOOLEAN, 1, v ? true_ : false_};
         sink((const char*)buf, 3);
+    }
+
+    inline void ber_deserialize(bool& v, source_type auto&& src)
+    {
+        using namespace details;
+        if (read_one(src) != TAG_BOOLEAN)
+            throw std::system_error(snmp_error::UNEXPECTED_TAG);
+        if (ber_deserialize_length(src) != 1)
+            throw std::system_error(snmp_error::UNEXPECTED_LENGTH);
+        v = read_one(src) > 0;
     }
 
 //----------------------------------------------------------------------------------------------------------------
@@ -155,24 +249,51 @@ namespace snmp
         ber_serialize_length(nbytes, sink);
 
         // Serialize integer - special consideration for possible leading zero because of sign bit
-        char buf[sizeof(U) + 1];
+        char buf[sizeof(U) + 1]{};
 
         for (size_t i = 0; i < nbytes; ++i)
         {
             const size_t idx = nbytes - 1 - i;
-
-            if (idx >= sizeof(U))
-                buf[i] = 0; // Extra leading zero for a positive unsigned value
-            else
+            if (idx < sizeof(U))
                 buf[i] = static_cast<char>((bits >> (idx * 8)) & 0xffu);
         }
 
         sink(buf, nbytes);
     }
 
+    inline void ber_deserialize(std::integral auto& v, source_type auto&& src)
+    {
+        using namespace details;
+        using T = std::remove_cvref_t<decltype(v)>;
+
+        if (read_one(src) != TAG_INTEGER)
+            throw std::system_error(snmp_error::UNEXPECTED_TAG);
+
+        const size_t len = ber_deserialize_length(src);
+
+        if (len == 0)
+            throw std::system_error(snmp_error::UNEXPECTED_LENGTH);
+        if (len > (sizeof(T) + 1))
+            throw std::system_error(snmp_error::INTEGER_OVERFLOW);
+
+        uint8_t buf[sizeof(T) + 1];
+        src((char*)buf, len);
+        const bool negative = (buf[0] & 0x80u) != 0;
+
+        uint64_t bits = negative ? std::numeric_limits<uint64_t>::max() : uint64_t{0};
+        for (size_t i = 0 ; i < len ; ++i)
+            bits = (bits << 8) | static_cast<uint64_t>(buf[i]);
+
+        if constexpr (std::is_unsigned_v<T>)
+            if (negative)
+                throw std::system_error(snmp_error::INTEGER_OVERFLOW);
+
+        v = static_cast<T>(bits);
+    }
+
 //----------------------------------------------------------------------------------------------------------------
 
-    void ber_serialize(std::string_view v, sink_type auto&& sink)
+    inline void ber_serialize(std::string_view v, sink_type auto&& sink)
     {
         using namespace details;
         sink((const char*)&TAG_STRING, 1);
@@ -181,11 +302,68 @@ namespace snmp
             sink(v.data(), v.size());
     }
 
-    void ber_serialize(const char* v, sink_type auto&& sink)
+    inline void ber_serialize(const char* v, sink_type auto&& sink)
     {
         ber_serialize(std::string_view(v), sink);
     }
+
+    inline void ber_deserialize(std::string& v, source_type auto&& src)
+    {
+        using namespace details;
+
+        if (read_one(src) != TAG_STRING)
+            throw std::system_error(snmp_error::UNEXPECTED_TAG);
+
+        const size_t len = ber_deserialize_length(src);
+        v.resize(len);
+        if (len > 0)
+            src(v.data(), len);
+    }
     
+//----------------------------------------------------------------------------------------------------------------
+
+    inline void ber_serialize(const const_sequence_container auto& v, sink_type auto&& sink)
+    {
+        using namespace details;
+        using snmp::ber_serialize;
+
+        // This function has to serialize TWICE!!!
+
+        // Count total number of bytes required to serialize v
+        size_t counter{};
+        for (const auto& el : v)
+            ber_serialize(el, counter_sink(counter));
+
+        // Serialize to sink
+        sink((const char*)&TAG_SEQUENCE, 1);
+        ber_serialize_length(counter, sink);
+        for (const auto& el : v)
+            ber_serialize(el, sink);
+    }
+
+//----------------------------------------------------------------------------------------------------------------
+
+    inline void ber_deserialize(appendable_sequence_container auto& v, source_type auto&& src)
+    {
+        using namespace details;
+        using snmp::ber_deserialize;
+        using T = sequence_value_t<decltype(v)>;
+
+        if (read_one(src) != TAG_SEQUENCE)
+            throw std::system_error(snmp_error::UNEXPECTED_TAG);
+
+        const size_t len = ber_deserialize_length(src);
+        size_t counter{};
+        v.clear();
+
+        for (; counter < len;)
+        {
+            T el{};
+            ber_deserialize(el, counted_source(counter, src));
+            v.push_back(std::move(el));
+        }
+    }
+
 //----------------------------------------------------------------------------------------------------------------
 
 }
